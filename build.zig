@@ -4,9 +4,11 @@ const std = @import("std");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
-    const zig_bench_mod = b.createModule(.{
-        .root_source_file = .{ .path = "./zig-bench/bench.zig" },
+    const zig_bench = b.createModule(.{
+        .root_source_file = b.path("zig-bench/bench.zig"),
     });
+
+    const maolonglong_spsc_queue = b.createModule(.{ .root_source_file = b.path("third-party/maolonglong/spsc_queue/src/spsc_queue.zig") });
 
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -39,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("bench", zig_bench_mod);
+    exe.root_module.addImport("bench", zig_bench);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -84,6 +86,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_unit_tests.root_module.addImport("bench", zig_bench);
+    exe_unit_tests.root_module.addImport(
+        "maolonglong/spsc_queue",
+        maolonglong_spsc_queue,
+    );
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
