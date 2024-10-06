@@ -1,3 +1,6 @@
 [submodule "zig-bench"]
 	path = zig-bench
 	url = https://github.com/Hejsil/zig-bench.git
+[submodule "third-party/maolonglong/spsc_queue"]
+	path = third-party/maolonglong/spsc_queue
+	url = https://github.com/hackathon-2024-10-05-sentry/spsc_queue.git
