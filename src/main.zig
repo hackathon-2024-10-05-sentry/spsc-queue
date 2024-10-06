@@ -1,6 +1,7 @@
 const std = @import("std");
 const bench = @import("bench");
 const maolonglong_spsc_queue = @import("maolonglong/spsc_queue");
+const ai_queue = @import("rigtorp_q.zig");
 
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
@@ -18,11 +19,55 @@ pub fn main() !void {
     try bw.flush(); // don't forget to flush!
 }
 
-test "benchmark maolong" {
+test "benchmarks" {
     try bench.benchmark(struct {
         const numitems = 100_000;
 
-        pub const min_iterations = 100;
+        pub const min_iterations = 1_000;
+
+        pub fn rigtorp() !usize {
+            const Q = ai_queue.SPSCQueue(i32, null);
+
+            const Closure = struct {
+                const Self = @This();
+
+                read_count: usize = 0,
+                write_done: bool = false,
+                q: Q,
+
+                fn producer(self: *Self) !void {
+                    for (0..numitems) |_| {
+                        while (!self.q.push(1)) {
+                            try std.Thread.yield();
+                        }
+                    }
+                    @atomicStore(bool, &self.write_done, true, .seq_cst);
+                }
+
+                fn consumer(self: *Self) !void {
+                    while (!@atomicLoad(bool, &self.write_done, .seq_cst)) {
+                        if (self.q.pop() != null) {
+                            self.read_count += 1;
+                        } else {
+                            try std.Thread.yield();
+                        }
+                    }
+                    while (self.q.pop() != null) {
+                        self.read_count += 1;
+                    }
+                }
+            };
+
+            var c = Closure{ .q = try Q.init(std.testing.allocator, 1024) };
+            defer c.q.deinit();
+
+            const thread = try std.Thread.spawn(.{}, Closure.producer, .{&c});
+            try c.consumer();
+            thread.join();
+
+            try std.testing.expectEqual(numitems, c.read_count);
+            return c.read_count;
+        }
 
         pub fn spscQueue() !usize {
             const Q = maolonglong_spsc_queue.SPSCQueue(i32);
