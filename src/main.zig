@@ -26,7 +26,7 @@ test "benchmarks" {
         pub const min_iterations = 1_000;
 
         pub fn rigtorp() !usize {
-            const Q = ai_queue.SPSCQueue(i32, null);
+            const Q = ai_queue.SPSCQueue(i32, 1024);
 
             const Closure = struct {
                 const Self = @This();
@@ -58,7 +58,7 @@ test "benchmarks" {
                 }
             };
 
-            var c = Closure{ .q = try Q.init(std.testing.allocator, 1024) };
+            var c = Closure{ .q = try Q.init(std.testing.allocator, null) };
             defer c.q.deinit();
 
             const thread = try std.Thread.spawn(.{}, Closure.producer, .{&c});

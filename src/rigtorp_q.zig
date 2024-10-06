@@ -7,41 +7,56 @@ pub fn SPSCQueue(comptime T: type, comptime comptime_capacity: ?usize) type {
 
         const CacheLineSize = std.atomic.cache_line;
 
-        // TODO(mvejnovic): I don't understand this janky implementation.
-        const PostSlotsPadding = (CacheLineSize - 1) / @sizeOf(T) + 1;
+        // SlotsPadding serves to pad the start and end of self.slots so that false
+        // sharing can be avoided between the elements in slots and some other memory
+        // that may be present in the system.
+        // https://en.wikipedia.org/wiki/False_sharing
+        //
+        // TODO(mvejnovic): I don't understand this seemingly janky implementation of
+        // SlotsPadding.
+        const SlotsPadding: usize = (CacheLineSize - 1) / @sizeOf(T) + 1;
 
         allocator: std.mem.Allocator,
         // Note(mvejnovic): These slots are not line aligned. If you can pin the
         // producer core, that's ideal, if you cannot, you're gonezo.
-        slots: []T,
+        // Working with points as a slice is slightly annoying since there is padding
+        // in the array so the "capacity" is slightly misleading.
+        slots: [*]T,
+        capacity: usize,
 
+        // The alignment here is EXTREMELY important as it pushes the
         write_idx: std.atomic.Value(usize) align(std.atomic.cache_line),
         read_idx_cache: usize align(std.atomic.cache_line),
         read_idx: std.atomic.Value(usize) align(std.atomic.cache_line),
         write_idx_cache: usize align(std.atomic.cache_line),
 
-        pub fn init(allocator: std.mem.Allocator, requested_capacity: usize) !Self {
-            if (comptime_capacity != null and comptime_capacity != requested_capacity) {
+        pub fn init(allocator: std.mem.Allocator, requested_capacity: ?usize) !Self {
+            if (comptime_capacity == null and requested_capacity == null) {
                 return error.InvalidCapacity;
             }
 
-            if (requested_capacity == 0) {
+            if (comptime_capacity != null and requested_capacity != null and comptime_capacity != requested_capacity) {
+                return error.InvalidCapacity;
+            }
+
+            if (requested_capacity orelse comptime_capacity.? == 0) {
                 return error.InvalidCapacity;
             }
 
             // This is the total number of chunks we plan on allocating.
-            const requested_raw_capacity = requested_capacity + 1;
+            const requested_raw_capacity = requested_capacity orelse comptime_capacity.? + 1;
 
             // Simply the maximum number of bytes
             const max_raw_capacity = std.math.maxInt(usize);
 
-            if (requested_raw_capacity > max_raw_capacity - 2 * PostSlotsPadding) {
+            if (requested_raw_capacity > max_raw_capacity - 2 * SlotsPadding) {
                 return error.InvalidCapacity;
             }
 
             const self: Self = .{
                 .allocator = allocator,
-                .slots = try allocator.alloc(T, requested_raw_capacity),
+                .slots = (try allocator.alloc(T, requested_raw_capacity + 2 * SlotsPadding)).ptr,
+                .capacity = requested_raw_capacity,
                 .write_idx = std.atomic.Value(usize).init(0),
                 .read_idx_cache = 0,
                 .read_idx = std.atomic.Value(usize).init(0),
@@ -55,9 +70,16 @@ pub fn SPSCQueue(comptime T: type, comptime comptime_capacity: ?usize) type {
             return self;
         }
 
+        pub fn deinit(self: *Self) void {
+            while (self.front() != null) {
+                _ = self.pop();
+            }
+
+            self.allocator.free(self.slots[0..(self.capacity + 2 * SlotsPadding)]);
+        }
+
         pub fn capacity(self: *const Self) bool {
-            // There is an extra element at the end used as a slack element.
-            return self.slots.len - 1;
+            return self.capacity - 1;
         }
 
         pub fn empty(self: *const Self) bool {
@@ -80,7 +102,7 @@ pub fn SPSCQueue(comptime T: type, comptime comptime_capacity: ?usize) type {
                 }
             }
 
-            self.slots[next_write_idx] = value;
+            self.slots[write_idx + SlotsPadding] = value;
             self.write_idx.store(next_write_idx, .release);
 
             return true;
@@ -107,6 +129,35 @@ pub fn SPSCQueue(comptime T: type, comptime comptime_capacity: ?usize) type {
             return val;
         }
 
+        pub fn spinPush(self: *Self, value: T, timeout_ns: u64) !void {
+            var timer = try std.time.Timer.start();
+
+            while (timer.read() < timeout_ns) {
+                if (self.push(value)) {
+                    return;
+                }
+
+                try std.Thread.yield();
+            }
+
+            return error.SpinningTimedOut;
+        }
+
+        pub fn spinPop(self: *Self, timeout_ns: u64) !T {
+            var timer = try std.time.Timer.start();
+
+            while (timer.read() < timeout_ns) {
+                const value = self.pop();
+                if (value != null) {
+                    return value.?;
+                }
+
+                try std.Thread.yield();
+            }
+
+            return error.SpinningTimedOut;
+        }
+
         pub fn front(self: *Self) ?T {
             const read_idx = self.read_idx.load(.monotonic);
 
@@ -122,24 +173,20 @@ pub fn SPSCQueue(comptime T: type, comptime comptime_capacity: ?usize) type {
                 }
             }
 
-            return self.slots[read_idx + PostSlotsPadding];
-        }
-
-        pub fn deinit(self: *Self) void {
-            while (self.front() != null) {
-                _ = self.pop();
-            }
+            return self.slots[read_idx + SlotsPadding];
         }
 
         fn nextIdx(self: *const Self, index: usize) usize {
-            if (comptime_capacity != null and mathex.isPowerOfTwo(comptime_capacity)) {
+            if (comptime_capacity != null and mathex.isPowerOfTwo(comptime_capacity.?)) {
                 // This and trick is equivalent to performing the modulo operation for
                 // powers of two.
-                return (index + 1) & (std.math.intln2(index) - 1);
+                const mask = comptime_capacity.? - 1;
+
+                return (index + 1) & mask;
             } else {
                 var next_read_idx: usize = undefined;
                 next_read_idx = index + 1;
-                if (next_read_idx == self.slots.len) {
+                if (next_read_idx == self.capacity) {
                     next_read_idx = 0;
                 }
 
